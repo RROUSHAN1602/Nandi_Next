@@ -1,8 +1,10 @@
 streamlit
 pandas
 numpy
-pyotp
 plotly
 ta
-openpyxl
+pyotp
 smartapi-python
+logzero
+websocket-client
+openpyxl
