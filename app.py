@@ -13,8 +13,8 @@ from Stock_list_token import stock_list
 
 # ------------------- CONFIG -------------------
 st.set_page_config(page_title="🕯️ Nandi Breakout Scanner", layout="wide")
-st.title("🕯️ Nandi White Candle → High Breakout Scanner (Batch of 100)")
-st.caption("Shows only those stocks where White Candle formed recently AND its HIGH is crossed within X days.")
+st.title("🕯️ Nandi White Candle → CLOSE Breakout Scanner (Batch of 100)")
+st.caption("Shows only those stocks where White Candle formed recently AND within X days ANY candle CLOSES above White Candle HIGH.")
 
 
 # ------------------- ANGEL ONE LOGIN (YOUR CREDENTIALS) -------------------
@@ -63,7 +63,7 @@ def fetch_ohlc_data_by_token(symboltoken, interval, from_date, to_date):
         data = pd.DataFrame(response["data"], columns=["timestamp", "open", "high", "low", "close", "volume"])
         data["timestamp"] = pd.to_datetime(data["timestamp"])
         data[["open", "high", "low", "close", "volume"]] = data[["open", "high", "low", "close", "volume"]].astype(float)
-        return data
+        return data.sort_values("timestamp").reset_index(drop=True)
     except Exception:
         return None
 
@@ -83,7 +83,6 @@ def compute_cmo(close: pd.Series, length: int) -> pd.Series:
 
 def add_nandi_white_candle(df: pd.DataFrame, len_=20, mult=2.0, cmoLen=9, volMultiplier=1.5):
     """
-    Same logic as your project:
     condition1: absKRI > dev and prev absKRI <= prev dev and changePerc >= 0
     condition2: CMO crosses from negative to positive
     whiteCandle = condition1 & condition2
@@ -127,22 +126,22 @@ def add_nandi_white_candle(df: pd.DataFrame, len_=20, mult=2.0, cmoLen=9, volMul
     return out
 
 
-def find_high_cross_after(df_: pd.DataFrame, start_ts: pd.Timestamp, level: float, within_days: int):
+def find_close_cross_after(df_: pd.DataFrame, start_ts: pd.Timestamp, level: float, within_days: int):
     """
-    Returns (cross_ts, cross_high, cross_close) if df high crosses level
-    within 'within_days' days after start_ts; else None.
+    Returns (cross_ts, cross_close, cross_high) if ANY candle after start_ts
+    has close > level within 'within_days' days. Picks the FIRST occurrence.
     """
     end_ts = start_ts + pd.Timedelta(days=int(within_days))
     future = df_[(df_["timestamp"] > start_ts) & (df_["timestamp"] <= end_ts)].copy()
     if future.empty:
         return None
 
-    crossed = future[future["high"] >= level].sort_values("timestamp")
+    crossed = future[future["close"] > level].sort_values("timestamp")
     if crossed.empty:
         return None
 
     row = crossed.iloc[0]
-    return row["timestamp"], float(row["high"]), float(row["close"])
+    return row["timestamp"], float(row["close"]), float(row["high"])
 
 
 def excel_safe(df_: pd.DataFrame) -> pd.DataFrame:
@@ -211,7 +210,7 @@ b1, b2, b3, b4 = st.columns([1, 1, 1, 1])
 with b1:
     signal_lookback_days = st.number_input("🗓️ White Candle must be in last N days", min_value=1, max_value=180, value=10)
 with b2:
-    cross_within_days = st.number_input("🚀 X days to cross White Candle HIGH", min_value=1, max_value=60, value=3)
+    cross_within_days = st.number_input("🚀 X days window for CLOSE breakout", min_value=1, max_value=60, value=3)
 with b3:
     pick_signal = st.selectbox("If multiple signals, use:", ["LAST", "FIRST"], index=0)
 with b4:
@@ -220,7 +219,7 @@ with b4:
 cutoff_signal_date = scan_to_date - dt.timedelta(days=int(signal_lookback_days))
 st.success(
     f"✅ Signal cutoff: {cutoff_signal_date} → White Candle date must be ≥ cutoff\n"
-    f"✅ Breakout rule: HIGH must be crossed within {int(cross_within_days)} days after the signal candle."
+    f"✅ Breakout rule: ANY candle CLOSE must be > White Candle HIGH within {int(cross_within_days)} days."
 )
 
 run_scan = st.button(f"🚀 Scan Batch {batch_no}", use_container_width=True)
@@ -264,11 +263,11 @@ if run_scan:
                     wc_high = float(signal_row["high"])
                     wc_low = float(signal_row["low"])
 
-                    cross = find_high_cross_after(df_scan, wc_ts, wc_high, int(cross_within_days))
+                    # ✅ NEW RULE: ANY candle CLOSE > WhiteCandle HIGH within X days
+                    cross = find_close_cross_after(df_scan, wc_ts, wc_high, int(cross_within_days))
 
-                    # ✅ Keep ONLY if breakout happened within X days
                     if cross is not None:
-                        cross_ts, cross_high, cross_close = cross
+                        cross_ts, cross_close, cross_high = cross
                         days_to_cross = (cross_ts.date() - wc_ts.date()).days
 
                         results.append({
@@ -283,16 +282,17 @@ if run_scan:
                             "Change%": float(signal_row["changePerc"]),
                             "VolSpike_On_WhiteCandle": bool(signal_row["volSpike"]),
 
-                            "Cross_Timestamp": cross_ts,
-                            "Cross_High": cross_high,
-                            "Cross_Close": cross_close,
-                            "Days_To_Cross": int(days_to_cross),
+                            "CloseCross_Timestamp": cross_ts,
+                            "CloseCross_Close": cross_close,
+                            "CloseCross_High": cross_high,
+                            "Days_To_CloseCross": int(days_to_cross),
 
                             "Interval": scan_interval,
                             "Scan_From": scan_from_date,
                             "Scan_To": scan_to_date,
                             "Batch_No": batch_no,
                             "Cross_Within_Days": int(cross_within_days),
+                            "Rule": "ANY candle CLOSE > WhiteCandle HIGH",
                         })
 
         progress.progress(i / n)
@@ -302,20 +302,23 @@ if run_scan:
     status.success(f"✅ Done. Found: {len(results)} | Failed: {failed}")
 
     if not results:
-        st.warning("No stocks matched: White Candle HIGH was not crossed within X days.")
+        st.warning("No stocks matched: No candle CLOSE crossed above White Candle HIGH within the window.")
     else:
-        out_df = pd.DataFrame(results).sort_values(["Cross_Timestamp", "Days_To_Cross"], ascending=[False, True])
+        out_df = pd.DataFrame(results).sort_values(
+            ["CloseCross_Timestamp", "Days_To_CloseCross"],
+            ascending=[False, True]
+        )
         st.dataframe(out_df, use_container_width=True)
 
         out_df_excel = excel_safe(out_df)
         excel_buffer = io.BytesIO()
         with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
-            out_df_excel.to_excel(writer, index=False, sheet_name=f"Nandi_Breakout_B{batch_no}")
+            out_df_excel.to_excel(writer, index=False, sheet_name=f"Nandi_CloseBreak_B{batch_no}")
 
         st.download_button(
             "⬇️ Download Excel",
             data=excel_buffer.getvalue(),
-            file_name=f"nandi_whitecandle_high_breakout_batch_{batch_no}.xlsx",
+            file_name=f"nandi_whitecandle_close_breakout_batch_{batch_no}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True
         )
